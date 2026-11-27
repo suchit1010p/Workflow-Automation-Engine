@@ -8,6 +8,13 @@ const api = async (path, options) => {
   return body
 }
 const date = (value) => value ? new Date(value).toLocaleString() : '—'
+const notificationStorageKey = 'workflow-engine-message-notifications'
+
+function persistNotificationState(state) {
+  try {
+    localStorage.setItem(notificationStorageKey, JSON.stringify({ cursor: state.cursor, pendingIds: [...state.pendingIds] }))
+  } catch {}
+}
 
 function App() {
   const [workflows, setWorkflows] = useState([])
@@ -23,16 +30,31 @@ function App() {
   const [generationBusy, setGenerationBusy] = useState(false)
   const [saveBusy, setSaveBusy] = useState(false)
   const [messageNotifications, setMessageNotifications] = useState([])
-  const lastMessageId = useRef(null)
+  const notificationState = useRef(null)
   const refresh = useCallback(async () => {
     const [workflowData, runData, messageData] = await Promise.all([api('/workflows'), api('/runs'), api('/messages')])
     setWorkflows(workflowData); setRuns(runData); setMessages(messageData)
     const highestMessageId = messageData.reduce((highest, message) => Math.max(highest, message.id), 0)
-    if (lastMessageId.current === null) lastMessageId.current = highestMessageId
-    else if (highestMessageId > lastMessageId.current) {
-      const freshMessages = messageData.filter((message) => message.id > lastMessageId.current).sort((left, right) => left.id - right.id)
-      lastMessageId.current = highestMessageId
+    if (notificationState.current === null) {
+      let savedState = null
+      try { savedState = JSON.parse(localStorage.getItem(notificationStorageKey) || 'null') } catch {}
+      if (savedState && Number.isFinite(savedState.cursor) && Array.isArray(savedState.pendingIds)) {
+        const pendingIds = new Set(savedState.pendingIds.filter(Number.isInteger))
+        const pendingMessages = messageData.filter((message) => pendingIds.has(message.id))
+        const missedMessages = messageData.filter((message) => message.id > savedState.cursor)
+        for (const message of missedMessages) pendingIds.add(message.id)
+        notificationState.current = { cursor: Math.max(savedState.cursor, highestMessageId), pendingIds }
+        setMessageNotifications([...new Map([...pendingMessages, ...missedMessages].map((message) => [message.id, message])).values()])
+      } else {
+        notificationState.current = { cursor: highestMessageId, pendingIds: new Set() }
+      }
+      persistNotificationState(notificationState.current)
+    } else if (highestMessageId > notificationState.current.cursor) {
+      const freshMessages = messageData.filter((message) => message.id > notificationState.current.cursor).sort((left, right) => left.id - right.id)
+      notificationState.current.cursor = highestMessageId
+      for (const message of freshMessages) notificationState.current.pendingIds.add(message.id)
       if (freshMessages.length) setMessageNotifications((current) => [...current, ...freshMessages])
+      persistNotificationState(notificationState.current)
     }
     if (selected) setSelected(await api(`/runs/${selected.id}`).catch(() => null))
   }, [selected?.id])
@@ -65,7 +87,11 @@ function App() {
       await refresh()
     } catch (error) { setNotice(error.message) } finally { setSaveBusy(false) }
   }
-  const dismissMessage = (messageId) => setMessageNotifications((current) => current.filter((message) => message.id !== messageId))
+  const dismissMessage = (messageId) => {
+    setMessageNotifications((current) => current.filter((message) => message.id !== messageId))
+    notificationState.current?.pendingIds.delete(messageId)
+    if (notificationState.current) persistNotificationState(notificationState.current)
+  }
   const describeStep = (step) => {
     if (step.type === 'condition') return `If ${step.field} ${step.operator.replaceAll('_', ' ')} ${JSON.stringify(step.value)}`
     if (step.type === 'wait') return `Wait ${step.durationMs >= 60_000 ? `${step.durationMs / 60_000} minute(s)` : `${step.durationMs / 1000} second(s)`}`
