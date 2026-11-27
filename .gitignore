@@ -3,3 +3,4 @@ frontend/dist/
 backend/data/*.sqlite
 backend/data/*.sqlite-shm
 backend/data/*.sqlite-wal
+.env
