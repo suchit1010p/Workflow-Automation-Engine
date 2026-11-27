@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import { db } from './database.js'
 import { execute, resumeWaitingRuns, triggerWorkflow } from './engine.js'
+import { generateWorkflow, validateWorkflowDefinition } from './workflow-generator.js'
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
@@ -22,24 +23,20 @@ if (!db.prepare('SELECT id FROM workflows LIMIT 1').get()) {
   db.prepare('INSERT INTO workflows (name, definition) VALUES (?, ?)').run('High-value order follow-up', JSON.stringify(demo))
 }
 
-function validateDefinition(definition) {
-  if (!definition || typeof definition !== 'object' || !Array.isArray(definition.steps) || !definition.startAt) return 'definition must include startAt and a steps array'
-  const ids = new Set()
-  for (const step of definition.steps) {
-    if (!step.id || ids.has(step.id)) return 'each step must have a unique id'
-    ids.add(step.id)
-    if (!['task', 'condition', 'wait', 'message'].includes(step.type)) return `unsupported step type: ${step.type}`
-    if (step.type === 'condition' && !['equals', 'not_equals', 'greater_than', 'less_than'].includes(step.operator)) return `unsupported condition operator: ${step.operator}`
-  }
-  if (!ids.has(definition.startAt)) return 'startAt must reference an existing step'
-  return null
-}
 const workflowRow = (row) => row && ({ ...row, definition: JSON.parse(row.definition) })
 const runRow = (row) => row && ({ ...row, trigger_data: JSON.parse(row.trigger_data), logs: JSON.parse(row.logs) })
 
+app.post('/api/workflows/generate', async (req, res, next) => {
+  try {
+    res.json(await generateWorkflow(req.body?.description))
+  } catch (error) {
+    next(error)
+  }
+})
+
 app.post('/api/workflows', (req, res) => {
   const { name, definition } = req.body || {}
-  const error = validateDefinition(definition)
+  const error = validateWorkflowDefinition(definition)
   if (!name || error) return res.status(400).json({ error: error || 'name is required' })
   const result = db.prepare('INSERT INTO workflows (name, definition) VALUES (?, ?)').run(name, JSON.stringify(definition))
   res.status(201).json(workflowRow(db.prepare('SELECT * FROM workflows WHERE id = ?').get(result.lastInsertRowid)))
@@ -62,7 +59,7 @@ app.get('/api/runs/:id', (req, res) => {
 })
 app.get('/api/messages', (_req, res) => res.json(db.prepare('SELECT * FROM messages ORDER BY id DESC').all()))
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }))
-app.use((error, _req, res, _next) => res.status(400).json({ error: error.message }))
+app.use((error, _req, res, _next) => res.status(error.status || 400).json({ error: error.message }))
 
 resumeWaitingRuns()
 app.listen(port, () => console.log(`Workflow API listening on http://localhost:${port}`))
