@@ -13,23 +13,34 @@ function persist(run, values) {
 
 function scheduleResume(runId, when) {
   clearTimeout(timers.get(runId))
-  const delay = Math.max(0, new Date(when).getTime() - Date.now())
+  const resumeAt = Date.parse(when)
+  const delay = Math.max(0, Number.isFinite(resumeAt) ? resumeAt - Date.now() : 0)
   timers.set(runId, setTimeout(() => {
+    const run = getRun.get(runId)
+    if (!run || run.status !== 'waiting') {
+      timers.delete(runId)
+      return
+    }
+    const remaining = Date.parse(run.resume_at) - Date.now()
+    if (Number.isFinite(remaining) && remaining > 0) {
+      scheduleResume(runId, run.resume_at)
+      return
+    }
     timers.delete(runId)
     execute(runId)
-  }, delay))
+  }, Math.min(delay, 2_147_483_647)))
 }
 
 export function execute(runId) {
   let run = getRun.get(runId)
-  if (!run || !['queued', 'waiting'].includes(run.status)) return
+  if (!run || !['queued', 'running', 'waiting'].includes(run.status)) return
   const workflow = db.prepare('SELECT definition FROM workflows WHERE id = ?').get(run.workflow_id)
   if (!workflow) return
   const definition = JSON.parse(workflow.definition)
   const steps = new Map(definition.steps.map((step) => [step.id, step]))
   const data = JSON.parse(run.trigger_data)
   const logs = JSON.parse(run.logs)
-  let stepId = run.current_step || definition.startAt
+  let stepId = run.current_step ?? definition.startAt
   let count = 0
 
   try {
@@ -89,7 +100,11 @@ export function triggerWorkflow(workflowId, triggerData) {
 }
 
 export function resumeWaitingRuns() {
-  for (const run of db.prepare("SELECT id, resume_at FROM runs WHERE status = 'waiting'").all()) scheduleResume(run.id, run.resume_at)
+  const pending = db.prepare("SELECT id, status, resume_at FROM runs WHERE status IN ('queued', 'running', 'waiting') ORDER BY id").all()
+  for (const run of pending) {
+    if (run.status === 'waiting') scheduleResume(run.id, run.resume_at)
+    else execute(run.id)
+  }
 }
 
 export function makeId() { return randomUUID() }
